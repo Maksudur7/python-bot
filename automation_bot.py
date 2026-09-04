@@ -107,22 +107,39 @@ class SMSBowerBot:
             try:
                 async with async_playwright() as p:
                     self.log("Launching persistent Chromium browser session...")
+                    
+                    launch_args = [
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--js-flags=--max-old-space-size=256"
+                    ]
+                    
+                    # Try launching with channel='chrome' first, fallback to default Playwright Chromium if Google Chrome is not installed
                     try:
-                        context = await p.chromium.launch_persistent_context(
-                            user_data_dir=self.user_data_dir,
-                            headless=self.headless,
-                            channel="chrome",
-                            viewport={"width": 1366, "height": 768},
-                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                            args=[
-                                "--disable-blink-features=AutomationControlled",
-                                "--no-sandbox",
-                                "--disable-setuid-sandbox",
-                                "--disable-dev-shm-usage",
-                                "--disable-gpu",
-                                "--js-flags=--max-old-space-size=256"
-                            ]
-                        )
+                        try:
+                            context = await p.chromium.launch_persistent_context(
+                                user_data_dir=self.user_data_dir,
+                                headless=self.headless,
+                                channel="chrome",
+                                viewport={"width": 1366, "height": 768},
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                                args=launch_args
+                            )
+                        except Exception as chrome_err:
+                            if "chrome" in str(chrome_err).lower() or "not found" in str(chrome_err).lower():
+                                self.log("System Google Chrome not found, switching to Playwright default Chromium...")
+                                context = await p.chromium.launch_persistent_context(
+                                    user_data_dir=self.user_data_dir,
+                                    headless=self.headless,
+                                    viewport={"width": 1366, "height": 768},
+                                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                                    args=launch_args
+                                )
+                            else:
+                                raise chrome_err
                     except Exception as launch_err:
                         self.log(f"Browser launch warning: {launch_err}. Retrying clean profile launch...")
                         # Remove lock again and retry once
@@ -134,15 +151,9 @@ class SMSBowerBot:
                         context = await p.chromium.launch_persistent_context(
                             user_data_dir=self.user_data_dir,
                             headless=self.headless,
-                            channel="chrome",
                             viewport={"width": 1366, "height": 768},
                             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                            args=[
-                                "--disable-blink-features=AutomationControlled",
-                                "--disable-dev-shm-usage",
-                                "--disable-gpu",
-                                "--js-flags=--max-old-space-size=256"
-                            ]
+                            args=launch_args
                         )
 
                     self.current_context = context
