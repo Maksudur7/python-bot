@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SMSBower Web Cabinet & FamilyTreeNow Automation Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header Toolbar -->
+        <header class="top-header">
+            <div class="brand-title">
+                <div class="logo-icon">⚡</div>
+                <div>
+                    <h1>SMSBower & FamilyTreeNow Bot</h1>
+                    <span class="sub-title">100% Playwright Cabinet Automation & Verification Engine</span>
+                </div>
+            </div>
+
+            <div class="toolbar-controls">
+                <label class="toggle-switch">
+                    <input type="checkbox" id="watch-live-toggle">
+                    <span class="slider"></span>
+                    <span class="toggle-label">👁️ Watch Live Browser Window</span>
+                </label>
+
+                <div class="status-badge idle" id="bot-status-badge">
+                    <span class="status-dot"></span>
+                    <span id="bot-status-text">IDLE</span>
+                </div>
+
+                <button id="btn-start" class="btn btn-primary">▶️ START CONTINUOUS BOT</button>
+                <button id="btn-stop" class="btn btn-danger" disabled>⏹️ STOP BOT</button>
+            </div>
+        </header>
+
+        <!-- Active Target Configuration Badge -->
+        <section class="target-config-banner">
+            <div class="config-icon">🎯</div>
+            <div class="config-details">
+                <span class="config-label">Active Target Configuration:</span>
+                <span class="config-badge">Service: <strong>Google / Gmail (go)</strong></span>
+                <span class="config-badge">Country: <strong>USA Physical (12)</strong></span>
+                <span class="config-badge highlight">Target Offer: <strong>Gold #3170 ($0.75)</strong></span>
+                <span class="config-badge cost">$0 Net Cost Auto-Refund</span>
+            </div>
+        </section>
+
+        <!-- Metrics Grid -->
+        <section class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-icon blue">📱</div>
+                <div class="metric-info">
+                    <span class="metric-value" id="metric-checked">0</span>
+                    <span class="metric-label">Numbers Checked</span>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon green">📁</div>
+                <div class="metric-info">
+                    <span class="metric-value" id="metric-saved">0</span>
+                    <span class="metric-label">Records Saved (Sheet)</span>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon purple">↩️</div>
+                <div class="metric-info">
+                    <span class="metric-value" id="metric-cancelled">0</span>
+                    <span class="metric-label">Cancelled ($0 Cost)</span>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-icon status">🔄</div>
+                <div class="metric-info">
+                    <span class="metric-value status-text" id="metric-live-status">IDLE</span>
+                    <span class="metric-label">Engine Live State</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Content Area: Terminal & Table Split -->
+        <div class="main-split">
+            <!-- Terminal Output Console -->
+            <section class="console-card">
+                <div class="card-header">
+                    <div class="header-left">
+                        <span class="terminal-dots">
+                            <span class="dot red"></span>
+                            <span class="dot yellow"></span>
+                            <span class="dot green"></span>
+                        </span>
+                        <h3>Playwright Realtime Action Console</h3>
+                    </div>
+                    <button id="btn-clear-console" class="btn btn-sm btn-outline">Clear Logs</button>
+                </div>
+                <div class="console-body" id="terminal-console">
+                    <div class="log-line system">[00:00:00] Dashboard control system ready. Click START CONTINUOUS BOT to launch browser loop.</div>
+                </div>
+            </section>
+
+            <!-- Saved Records Sheet Table -->
+            <section class="table-card">
+                <div class="card-header">
+                    <h3>Saved Matches Database Sheet</h3>
+                    <a href="/api/bot/export_csv" class="btn btn-sm btn-accent" download>📥 Export CSV (saved_numbers_sheet.csv)</a>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Phone</th>
+                                <th>Order ID</th>
+                                <th>Name</th>
+                                <th>Age</th>
+                                <th>Location</th>
+                                <th>Relatives</th>
+                                <th>Google Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="records-table-body">
+                            <tr>
+                                <td colspan="8" class="empty-state">No saved record matches yet. Bot will populate valid FamilyTreeNow results here.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
