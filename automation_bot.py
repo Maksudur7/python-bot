@@ -114,9 +114,13 @@ class SMSBowerBot:
                         "--disable-setuid-sandbox",
                         "--disable-dev-shm-usage",
                         "--disable-gpu",
+                        "--start-maximized",
                         "--js-flags=--max-old-space-size=256"
                     ]
                     
+                    viewport_opts = None if not self.headless else {"width": 1366, "height": 768}
+                    no_vp = True if not self.headless else False
+
                     # Try launching with channel='chrome' first, fallback to default Playwright Chromium if Google Chrome is not installed
                     try:
                         try:
@@ -124,8 +128,9 @@ class SMSBowerBot:
                                 user_data_dir=self.user_data_dir,
                                 headless=self.headless,
                                 channel="chrome",
-                                viewport={"width": 1366, "height": 768},
-                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                                viewport=viewport_opts,
+                                no_viewport=no_vp,
+                                ignore_default_args=["--enable-automation"],
                                 args=launch_args
                             )
                         except Exception as chrome_err:
@@ -134,8 +139,9 @@ class SMSBowerBot:
                                 context = await p.chromium.launch_persistent_context(
                                     user_data_dir=self.user_data_dir,
                                     headless=self.headless,
-                                    viewport={"width": 1366, "height": 768},
-                                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                                    viewport=viewport_opts,
+                                    no_viewport=no_vp,
+                                    ignore_default_args=["--enable-automation"],
                                     args=launch_args
                                 )
                             else:
@@ -151,14 +157,21 @@ class SMSBowerBot:
                         context = await p.chromium.launch_persistent_context(
                             user_data_dir=self.user_data_dir,
                             headless=self.headless,
-                            viewport={"width": 1366, "height": 768},
-                            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                            viewport=viewport_opts,
+                            no_viewport=no_vp,
+                            ignore_default_args=["--enable-automation"],
                             args=launch_args
                         )
 
                     self.current_context = context
                     
                     page = context.pages[0] if context.pages else await context.new_page()
+                    if not self.headless:
+                        try:
+                            await page.bring_to_front()
+                        except Exception:
+                            pass
+
                     await page.add_init_script("""
                         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                     """)
@@ -190,51 +203,59 @@ class SMSBowerBot:
                             await self._sleep_check(0.1)
                             if not self.is_running: break
                             
-                            # Step 2: Clear Stale Active Cards
-                            self.log("Step 2: Clearing any pre-existing active order cards...")
-                            await self._clear_active_cards(page)
-                            if not self.is_running: break
-
-                            # Step 3: Select Service (Google / Gmail - go)
-                            self.log("Step 3: Selecting Service -> Google / Gmail (go)...")
-                            service_selected = await self._select_service(page)
-                            if not service_selected:
-                                self.log("Warning: Service selector not clicked directly, attempting fallback...")
-                            if not self.is_running: break
-
-                            # Step 4: Select Position Rank (Gold)
-                            self.log("Step 4: Selecting Position Rank -> Gold...")
-                            await self._select_rank(page, "Gold")
-                            if not self.is_running: break
-
-                            # Step 5: Select Country (2nd USA Option - USA Physical)
-                            self.log("Step 5: Searching country 'usa' & selecting USA Physical...")
-                            await self._select_country(page)
-                            if not self.is_running: break
-
-                            # Step 6: Locate & Click Rank #3170 ($0.75)
-                            self.log("Step 6: Locating & clicking offer Gold #3170 ($0.75)...")
-                            purchased = await self._buy_target_offer(page)
-                            if purchased:
-                                self.log("Successfully clicked offer buy button!")
-                            else:
-                                self.log("Target offer #3170 ($0.75) not immediately available or clicked fallback offer.")
-                            if not self.is_running: break
-
-                            await self._sleep_check(0.3)
-                            if not self.is_running: break
-
-                            # Step 7: Extract Acquired Phone Number
-                            self.log("Step 7: Extracting acquired phone number from active order card...")
+                            # Step 2: Check if an active phone number is ALREADY present on cabinet
                             phone_number, order_id = await self._extract_active_phone(page)
+                            
+                            if not phone_number:
+                                # First try executing dynamically recorded workflow if recorded_workflow.py has actions
+                                recorded_executed = await self._execute_recorded_workflow(page)
+                                
+                                if not recorded_executed:
+                                    # Built-in Step 3: Select Service (Google / Gmail - go)
+                                    self.log("Step 3: Selecting Service -> Google / Gmail (go)...")
+                                    service_selected = await self._select_service(page)
+                                    if not service_selected:
+                                        await self._dismiss_overlays(page)
+                                        service_selected = await self._select_service(page)
+                                    if not self.is_running: break
+
+                                    # Built-in Step 4: Select Position Rank (Gold)
+                                    self.log("Step 4: Selecting Position Rank -> Gold...")
+                                    await self._select_rank(page, "Gold")
+                                    if not self.is_running: break
+
+                                    # Built-in Step 5: Select Country (2nd USA Option - USA Physical)
+                                    self.log("Step 5: Searching country 'usa' & selecting USA Physical...")
+                                    await self._select_country(page)
+                                    if not self.is_running: break
+
+                                    # Built-in Step 6: Locate & Click Offer Gold #3170 ($0.75)
+                                    self.log("Step 6: Locating & clicking offer Gold #3170 ($0.75)...")
+                                    purchased = await self._buy_target_offer(page)
+                                    if purchased:
+                                        self.log("Successfully clicked Google offer buy button!")
+                                    else:
+                                        self.log("Target Google offer #3170 ($0.75) not clicked yet. Retrying iteration...")
+                                        await self._sleep_check(1)
+                                        continue
+                                    if not self.is_running: break
+
+                                await self._sleep_check(0.5)
+                                if not self.is_running: break
+
+                                # Step 7: Extract Acquired Phone Number
+                                self.log("Step 7: Extracting acquired phone number from active order card...")
+                                phone_number, order_id = await self._extract_active_phone(page)
 
                             if not phone_number:
                                 self.log("No active phone number found on cabinet. Retrying iteration...")
-                                await self._sleep_check(0.5)
+                                await self._sleep_check(1)
                                 continue
 
                             self.numbers_checked += 1
-                            self.log(f"-> Acquired Phone Number: {phone_number} (Order ID: {order_id})")
+                            self.log(f"============================================================")
+                            self.log(f"📱 COPIED PHONE NUMBER: {phone_number} (Order ID: {order_id})")
+                            self.log(f"============================================================")
 
                             # Clean phone number for 10-digit search
                             phone_clean = re.sub(r"\D", "", phone_number)
@@ -255,7 +276,7 @@ class SMSBowerBot:
 
                             google_status = "Not Tested"
                             if ftn_data.get("found"):
-                                self.log(f"-> Match Found on FamilyTreeNow! Name: {ftn_data.get('name')}, Age: {ftn_data.get('age')}, Location: {ftn_data.get('location')}")
+                                self.log(f"-> 🎯 MATCH FOUND ON FAMILYTREENOW! Name: {ftn_data.get('name')}, Age: {ftn_data.get('age')}, Location: {ftn_data.get('location')}")
                                 
                                 # Step 9: Test Google Sign-In verification
                                 self.log("Step 9: Verifying Google Sign-In with acquired number...")
@@ -275,9 +296,9 @@ class SMSBowerBot:
                                     google_status=google_status
                                 )
                                 self.records_saved += 1
-                                self.log(f"-> Record saved to database & CSV! Total saved: {self.records_saved}")
+                                self.log(f"-> 💾 Record saved to database & CSV! Total saved: {self.records_saved}")
                             else:
-                                self.log("-> No matching personal record found on FamilyTreeNow.")
+                                self.log(f"-> No matching personal record found on FamilyTreeNow for {phone_10}.")
 
                             if not self.is_running: break
 
@@ -288,8 +309,8 @@ class SMSBowerBot:
                                 self.cancelled_cost += 1
                                 self.log(f"-> Order successfully cancelled! Total $0 refund cancellations: {self.cancelled_cost}")
 
-                            self.log("Iteration complete. Fast cycle delay 0.3s...")
-                            await self._sleep_check(0.3)
+                            self.log("Iteration complete. Fast cycle delay 0.5s...")
+                            await self._sleep_check(0.5)
 
                             if self.target_numbers and self.numbers_checked >= self.target_numbers:
                                 self.log(f"Target count of {self.target_numbers} numbers checked. Batch workflow finished successfully!")
@@ -318,123 +339,370 @@ class SMSBowerBot:
                 self.log(f"Browser session error: {context_err}")
                 await self._sleep_check(2)
 
+    async def _dismiss_overlays(self, page):
+        """Dismiss popups, modal overlays, cookie banners, or backdrop elements that intercept clicks."""
+        try:
+            close_selectors = [
+                ".popup-overlay .close-btn",
+                ".popup-overlay button:has-text('Close')",
+                ".popup-overlay button:has-text('OK')",
+                ".modal-close",
+                "button.close",
+                "[aria-label='Close']"
+            ]
+            for sel in close_selectors:
+                btn = await page.query_selector(sel)
+                if btn and await btn.is_visible():
+                    try:
+                        await btn.click(timeout=1000, force=True)
+                    except Exception:
+                        pass
+            
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            
+            await page.evaluate("""
+                () => {
+                    const overlays = document.querySelectorAll('.popup-overlay, .modal-backdrop, .v-overlay');
+                    overlays.forEach(el => {
+                        if (el && el.parentElement && el.style) {
+                            el.style.display = 'none';
+                            el.style.pointerEvents = 'none';
+                        }
+                    });
+                }
+            """)
+        except Exception:
+            pass
+
+    async def _safe_click(self, page, element):
+        """Attempt to click an element, falling back to force click or JS click if blocked by overlays."""
+        if not element:
+            return False
+        try:
+            await element.click(timeout=2000)
+            return True
+        except Exception:
+            try:
+                await element.click(timeout=2000, force=True)
+                return True
+            except Exception:
+                try:
+                    await page.evaluate("(el) => el.click()", element)
+                    return True
+                except Exception:
+                    return False
+
+    def _check_connection_error(self, e):
+        err_str = str(e).lower()
+        if "closed" in err_str or "driver" in err_str or "target" in err_str:
+            raise e
+
     async def _clear_active_cards(self, page):
+        await self._dismiss_overlays(page)
         try:
             cancel_buttons = await page.query_selector_all("button:has-text('Cancel'), button:has-text('Отмена'), .cancel-btn, [data-action='cancel']")
             for btn in cancel_buttons:
                 try:
                     if await btn.is_visible():
-                        await btn.click(timeout=3000)
+                        await self._safe_click(page, btn)
                         await asyncio.sleep(0.5)
-                except Exception:
-                    pass
+                except Exception as inner_e:
+                    self._check_connection_error(inner_e)
         except Exception as e:
+            self._check_connection_error(e)
             self.log(f"Note on clearing cards: {e}")
 
-    async def _select_service(self, page):
+    async def _execute_recorded_workflow(self, page):
+        """Execute exact Playwright codegen statements saved dynamically in recorded_workflow.py"""
+        file_path = os.path.join(os.path.dirname(__file__), "recorded_workflow.py")
+        if not os.path.exists(file_path):
+            return False
+
         try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            action_lines = []
+            for line in content.splitlines():
+                line_str = line.strip()
+                if any(kw in line_str for kw in ["page.get_by_", "page.locator", "page.query_selector", "page.click", "page.fill"]) and not line_str.startswith("#") and "goto" not in line_str:
+                    if not line_str.startswith("await "):
+                        line_str = "await " + line_str
+                    action_lines.append(line_str)
+
+            if not action_lines:
+                return False
+
+            self.log(f"🎬 Executing {len(action_lines)} dynamically recorded workflow steps from recorded_workflow.py...")
+            
+            local_scope = {"page": page, "asyncio": asyncio, "re": re}
+            executed_count = 0
+
+            for idx, stmt in enumerate(action_lines, 1):
+                if not self.is_running: break
+                self.log(f"-> Recorded Action {idx}/{len(action_lines)}: {stmt}")
+                try:
+                    exec_code = f"async def _step():\n    {stmt}\n"
+                    exec(exec_code, local_scope)
+                    await local_scope["_step"]()
+                    executed_count += 1
+                    await asyncio.sleep(0.5)
+                except Exception as step_err:
+                    self.log(f"-> Recorded Step {idx} note: {step_err}")
+
+            return executed_count > 0
+        except Exception as e:
+            self.log(f"Recorded workflow execution note: {e}")
+            return False
+
+    async def _select_service(self, page):
+        await self._dismiss_overlays(page)
+        try:
+            self.log("Step 3: Selecting Service -> Google / Gmail (go)...")
+            
+            # Primary Recorded Playwright Method
+            try:
+                box = page.get_by_role("combobox").get_by_text("Select service")
+                if await box.is_visible():
+                    await box.click()
+                    await asyncio.sleep(0.3)
+                    s_input = page.get_by_role("textbox", name="Select service")
+                    if await s_input.is_visible():
+                        await s_input.fill("google")
+                        await asyncio.sleep(0.5)
+                    opt = page.get_by_role("option", name="Google, Gmail, Youtube go")
+                    if await opt.is_visible():
+                        await opt.click()
+                        await asyncio.sleep(0.5)
+                        self.log("Successfully selected 'Google' service via recorded role selector.")
+                        return True
+            except Exception as rec_err:
+                self.log(f"Recorded service select note: {rec_err}")
+
+            # Fallback search box query selector
+            search_box = await page.query_selector("input[placeholder*='Select service'], [name='Select service'], .multiselect, .multiselect__tags, .multiselect__placeholder, input[name='service-name']")
+            if search_box:
+                await self._safe_click(page, search_box)
+                await asyncio.sleep(0.2)
+                await page.keyboard.type("google")
+                await asyncio.sleep(0.8)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(0.5)
+
             service_selectors = [
+                "text='Google, Gmail, Youtube'",
+                ".multiselect__option:has-text('Google')",
                 "[data-service='go']",
-                "[data-code='go']",
-                ".service-item[data-code='go']",
-                "div:has-text('Google')",
-                "span:has-text('Google')",
-                "img[alt*='Google']"
+                "[data-service='google']"
             ]
             for sel in service_selectors:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
-                    await el.click(timeout=3000)
-                    await asyncio.sleep(0.5)
-                    return True
-            return False
+                    if await self._safe_click(page, el):
+                        await asyncio.sleep(0.5)
+                        return True
+            return True
         except Exception as e:
+            self._check_connection_error(e)
             self.log(f"Service select note: {e}")
             return False
 
     async def _select_rank(self, page, rank_name="Gold"):
+        await self._dismiss_overlays(page)
         try:
+            self.log(f"Step 4: Selecting Position Rank -> {rank_name}...")
+            
+            # Primary recorded method: page.get_by_text("Gold", exact=True).click()
+            gold_loc = page.get_by_text(rank_name, exact=True)
+            if await gold_loc.is_visible():
+                await gold_loc.click()
+                await asyncio.sleep(0.5)
+                self.log(f"Successfully selected '{rank_name}' rank filter via get_by_text.")
+                return True
+
             rank_selectors = [
-                f"button:has-text('{rank_name}')",
-                f"span:has-text('{rank_name}')",
-                f".rank-filter:has-text('{rank_name}')",
+                "text='Gold'",
+                ".rank-item.gold",
+                ".rank-item:has-text('Gold')",
+                "div.rank-item:has-text('Gold')",
                 "[data-rank='gold']",
-                "div:has-text('Gold')"
+                "button:has-text('Gold')"
             ]
             for sel in rank_selectors:
                 el = await page.query_selector(sel)
                 if el and await el.is_visible():
-                    await el.click(timeout=3000)
-                    await asyncio.sleep(0.5)
-                    return True
+                    if await self._safe_click(page, el):
+                        await asyncio.sleep(0.5)
+                        self.log("Successfully selected 'Gold' rank filter.")
+                        return True
             return False
         except Exception as e:
+            self._check_connection_error(e)
             self.log(f"Rank select note: {e}")
             return False
 
     async def _select_country(self, page):
+        await self._dismiss_overlays(page)
         try:
-            search_inputs = [
-                "input[placeholder*='Select country']",
-                "input[placeholder*='Country']",
-                "input[placeholder*='Search']",
-                "input[type='search']",
-                "input[type='text']"
-            ]
-            for inp_sel in search_inputs:
-                inp = await page.query_selector(inp_sel)
-                if inp and await inp.is_visible():
-                    await inp.fill("usa")
-                    await asyncio.sleep(0.5)
-                    break
+            self.log("Step 5: Searching country 'usa' & expanding 2nd USA card (USA Physical)...")
             
-            select_btns = await page.query_selector_all("button:has-text('Select'), div:has-text('Select'), span:has-text('Select')")
-            for btn in select_btns:
-                try:
-                    if await btn.is_visible():
-                        await btn.click(timeout=3000)
-                        await asyncio.sleep(0.5)
-                except Exception:
-                    pass
+            # Step 1: Search 'usa' in country search input (as recorded)
+            c_box = page.get_by_role("textbox", name="Find country")
+            if await c_box.is_visible():
+                await c_box.click()
+                await c_box.fill("usa")
+            else:
+                c_inp = await page.query_selector("input[placeholder*='Find country'], input[placeholder*='Country']")
+                if c_inp and await c_inp.is_visible():
+                    await c_inp.click()
+                    await c_inp.fill("usa")
+
+            await asyncio.sleep(1.2)
+
+            # Step 2: Click 'Select' dropdown on the 2nd country card (USA Physical)
+            country_items = page.locator(".phone-country-item, .phone-country-item-body")
+            item_count = await country_items.count()
+
+            if item_count >= 2:
+                card2 = country_items.nth(1)
+                select_btn = card2.locator(".phone-country-item-show-hide-btn, .phone-country-select, .app-select__value-container, text='Select', button:has-text('Select')").first
+                if await select_btn.is_visible():
+                    await self._safe_click(page, select_btn)
+                    await asyncio.sleep(1.5)
+                    self.log("Successfully clicked 'Select' dropdown on 2nd USA card (USA Physical).")
+                    return True
+
+            # Fallback 1: try exact recorded selector
+            rec_sel = page.locator("div:nth-child(2) > .phone-country-item-body > .phone-country-select > .app-select > .app-select__control > .app-select__value-container")
+            if await rec_sel.is_visible():
+                await self._safe_click(page, rec_sel)
+                await asyncio.sleep(1.5)
+                self.log("Successfully clicked 2nd USA card dropdown via recorded selector.")
+                return True
+
+            # Fallback 2: locate all 'Select' / show-hide buttons
+            select_btns = page.locator(".phone-country-item-show-hide-btn, button:has-text('Select'), div:has-text('Select')")
+            if await select_btns.count() >= 2:
+                await self._safe_click(page, select_btns.nth(1))
+                await asyncio.sleep(1.5)
+                self.log("Expanded 2nd USA card dropdown table via fallback.")
+            elif await select_btns.count() > 0:
+                await self._safe_click(page, select_btns.nth(0))
+                await asyncio.sleep(1.5)
+                self.log("Expanded USA card dropdown table via fallback.")
+            return True
         except Exception as e:
+            self._check_connection_error(e)
             self.log(f"Country select note: {e}")
+            return False
 
     async def _buy_target_offer(self, page):
+        await self._dismiss_overlays(page)
         try:
-            offer_selectors = [
-                "button:has-text('0.75')",
-                "button:has-text('0.75 $')",
-                "button:has-text('$0.75')",
-                "tr:has-text('3170') button",
-                "div:has-text('3170') button",
-                ".country-item:has-text('USA') button:has-text('Buy')",
-                "button:has-text('Buy')"
-            ]
-            for sel in offer_selectors:
-                btns = await page.query_selector_all(sel)
-                for btn in btns:
-                    if await btn.is_visible():
-                        await btn.click(timeout=3000)
-                        await asyncio.sleep(1)
-                        return True
+            self.log("Step 6: Locating & clicking offer $0.75 / 0.75 $ buy button...")
+            for attempt in range(5):
+                # 1. Recorded locator: get_by_text("0.75 $", exact=True)
+                btn1 = page.get_by_text("0.75 $", exact=True)
+                if await btn1.is_visible():
+                    await btn1.click()
+                    await asyncio.sleep(1.5)
+                    self.log("Successfully clicked '0.75 $' offer buy button!")
+                    return True
+
+                # 2. Text locator variations
+                btn2 = page.locator("text='0.75 $'").first
+                if await btn2.is_visible():
+                    await self._safe_click(page, btn2)
+                    await asyncio.sleep(1.5)
+                    self.log("Successfully clicked '0.75 $' offer buy button!")
+                    return True
+
+                btn3 = page.locator("text='$0.75'").first
+                if await btn3.is_visible():
+                    await self._safe_click(page, btn3)
+                    await asyncio.sleep(1.5)
+                    self.log("Successfully clicked '$0.75' offer buy button!")
+                    return True
+
+                # 3. Table row containing 3170 or 0.75
+                rows = page.locator("tr:has-text('3170'), tr:has-text('0.75'), div:has-text('3170'), div:has-text('0.75')")
+                for r_idx in range(await rows.count()):
+                    row = rows.nth(r_idx)
+                    buy_btn = row.query_selector("button, .btn, a, div")
+                    if buy_btn and await buy_btn.is_visible():
+                        if await self._safe_click(page, buy_btn):
+                            await asyncio.sleep(1.5)
+                            self.log("Successfully clicked offer buy button in table row!")
+                            return True
+
+                await asyncio.sleep(0.5)
             return False
         except Exception as e:
+            self._check_connection_error(e)
             self.log(f"Buy offer note: {e}")
             return False
 
     async def _extract_active_phone(self, page):
-        for attempt in range(6):
-            content = await page.content()
-            soup = BeautifulSoup(content, "html.parser")
-            
-            raw_matches = re.findall(r"\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", soup.get_text())
-            for raw in raw_matches:
-                digits = re.sub(r"\D", "", raw)
-                if len(digits) in (10, 11):
-                    clean_phone = "+1" + digits[-10:]
-                    order_ids = re.findall(r"ID:?\s*(\d+)", soup.get_text())
-                    order_id = order_ids[0] if order_ids else f"ORD-{int(time.time())}"
-                    return clean_phone, order_id
+        # Scroll up to top of cabinet page to see active order card
+        try:
+            await page.evaluate("window.scrollTo(0, 0)")
+        except Exception:
+            pass
+
+        self.log("Step 7: Waiting for active phone number order card & copying number...")
+
+        for attempt in range(12):
+            # 1. Click copy button if present (as recorded: page.locator(".--copy > img"))
+            try:
+                copy_img = page.locator(".--copy > img, .--copy, [class*='copy']").first
+                if await copy_img.is_visible():
+                    await copy_img.click()
+                    self.log("Clicked active phone copy button (.--copy > img).")
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+            # 2. Check for phone number text in active order element or locator regex
+            try:
+                phone_loc = page.locator("text=/\\+?1[0-9]{10}/").first
+                if await phone_loc.is_visible():
+                    txt = await phone_loc.text_content()
+                    digits = re.sub(r"\D", "", txt)
+                    if len(digits) in (10, 11):
+                        clean_phone = "+1" + digits[-10:]
+                        self.log(f"Extracted active phone number: {clean_phone}")
+                        return clean_phone, f"ORD-{int(time.time())}"
+            except Exception:
+                pass
+
+            # 3. Full page text parsing via BeautifulSoup
+            try:
+                content = await page.content()
+                soup = BeautifulSoup(content, "html.parser")
+                page_text = soup.get_text()
+                
+                raw_matches = re.findall(r"\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}", page_text)
+                for raw in raw_matches:
+                    digits = re.sub(r"\D", "", raw)
+                    if len(digits) in (10, 11):
+                        clean_phone = "+1" + digits[-10:]
+                        order_ids = re.findall(r"ID:?\s*(\d+)", page_text)
+                        order_id = order_ids[0] if order_ids else f"ORD-{int(time.time())}"
+                        return clean_phone, order_id
+            except Exception:
+                pass
+
+            # Refresh cabinet page if order card delayed
+            if attempt == 5:
+                self.log("Refreshing cabinet page to load newly assigned phone number...")
+                try:
+                    await page.goto("https://smsbower.app/cabinet/client/phonehistory", wait_until="domcontentloaded", timeout=15000)
+                    await page.evaluate("window.scrollTo(0, 0)")
+                except Exception:
+                    pass
 
             await asyncio.sleep(0.8)
 

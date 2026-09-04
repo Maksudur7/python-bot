@@ -34,6 +34,23 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    const btnRecord = document.getElementById('btn-record');
+
+    // Record Workflow Handler
+    if (btnRecord) {
+        btnRecord.addEventListener('click', async () => {
+            try {
+                const res = await fetch('/api/bot/record', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    alert('🔴 PLAYWRIGHT WORKFLOW RECORDER LAUNCHED!\n\n1. Chrome window for SMSBower cabinet will open.\n2. Perform your manual clicks & steps.\n3. Close the Chrome window when finished!\n\nYour actions will be recorded automatically.');
+                }
+            } catch (e) {
+                console.error('Error starting recorder:', e);
+            }
+        });
+    }
+
     // Stop Bot Handler
     btnStop.addEventListener('click', async () => {
         try {

@@ -92,7 +92,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             body_data = {}
 
         if path == "/api/bot/start":
-            headless = body_data.get("headless", True)
+            headless = body_data.get("headless", False)
             del bot_instance.logs[:]
             success = bot_instance.start(headless=headless)
             if success:
@@ -107,6 +107,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"status": "ok", "message": "Bot stopping"})
             else:
                 self._send_json({"status": "error", "message": "Bot is not running"}, status_code=400)
+
+        elif path == "/api/bot/record":
+            if bot_instance.is_running:
+                bot_instance.stop()
+            
+            import subprocess, sys
+            venv_python = os.path.join(os.path.dirname(__file__), ".venv", "Scripts", "python.exe")
+            if not os.path.exists(venv_python):
+                venv_python = sys.executable
+            
+            rec_script = os.path.join(os.path.dirname(__file__), "record_workflow.py")
+            subprocess.Popen([venv_python, rec_script])
+            self._send_json({"status": "ok", "message": "Playwright Workflow Recorder launched!"})
 
         else:
             self.send_error(404, "Endpoint not found")
