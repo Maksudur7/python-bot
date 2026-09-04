@@ -208,7 +208,7 @@ class SMSBowerBot:
                             
                             if not phone_number:
                                 # First try executing dynamically recorded workflow if recorded_workflow.py has actions
-                                recorded_executed = await self._execute_recorded_workflow(page)
+                                recorded_executed = await self._execute_recorded_workflow(page, context)
                                 
                                 if not recorded_executed:
                                     # Built-in Step 3: Select Service (Google / Gmail - go)
@@ -415,8 +415,8 @@ class SMSBowerBot:
             self._check_connection_error(e)
             self.log(f"Note on clearing cards: {e}")
 
-    async def _execute_recorded_workflow(self, page):
-        """Execute exact Playwright codegen statements saved dynamically in recorded_workflow.py"""
+    async def _execute_recorded_workflow(self, page, context=None):
+        """Execute exact Playwright codegen statements saved dynamically in recorded_workflow.py (Supports Multi-Tab)"""
         file_path = os.path.join(os.path.dirname(__file__), "recorded_workflow.py")
         if not os.path.exists(file_path):
             return False
@@ -428,17 +428,29 @@ class SMSBowerBot:
             action_lines = []
             for line in content.splitlines():
                 line_str = line.strip()
-                if any(kw in line_str for kw in ["page.get_by_", "page.locator", "page.query_selector", "page.click", "page.fill"]) and not line_str.startswith("#") and "goto" not in line_str:
-                    if not line_str.startswith("await "):
+                if not line_str or line_str.startswith("#") or line_str.startswith("import ") or line_str.startswith("from "):
+                    continue
+                if any(skip_kw in line_str for skip_kw in ["async def ", "async with async_playwright", "browser =", "context.close()", "browser.close()"]):
+                    continue
+
+                if any(kw in line_str for kw in ["page", "click", "fill", "press", "locator", "get_by_", "new_page", "expect_popup"]):
+                    if not line_str.startswith("await ") and "=" not in line_str and not line_str.startswith("async with "):
                         line_str = "await " + line_str
                     action_lines.append(line_str)
 
             if not action_lines:
                 return False
 
-            self.log(f"🎬 Executing {len(action_lines)} dynamically recorded workflow steps from recorded_workflow.py...")
+            self.log(f"🎬 Executing {len(action_lines)} dynamically recorded workflow steps (Multi-Tab Supported)...")
             
-            local_scope = {"page": page, "asyncio": asyncio, "re": re}
+            local_scope = {
+                "page": page,
+                "page1": page,
+                "page2": page,
+                "context": context,
+                "asyncio": asyncio,
+                "re": re
+            }
             executed_count = 0
 
             for idx, stmt in enumerate(action_lines, 1):
