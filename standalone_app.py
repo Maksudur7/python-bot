@@ -128,7 +128,7 @@ def main():
     database.init_db()
     bot_instance.logs.clear()
     print("============================================================")
-    print("SMSBower Cabinet & FamilyTreeNow Automation Dashboard")
+    print("SMSBower Cabinet & FastPeopleSearch Automation Dashboard")
     print(f"Local Server running at: http://localhost:{PORT}")
     print("============================================================")
     

@@ -121,7 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 recordsTableBody.innerHTML = `
                     <tr>
-                        <td colspan="8" class="empty-state">No saved record matches yet. Bot will populate valid FamilyTreeNow results here.</td>
+                        <td colspan="8" class="empty-state">No saved record matches yet. Bot will populate valid FastPeopleSearch / FamilyTreeNow results here.</td>
                     </tr>
                 `;
             }
