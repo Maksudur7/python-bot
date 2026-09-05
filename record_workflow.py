@@ -35,10 +35,10 @@ def main():
     ]
 
     print("============================================================")
-    print("Launching Playwright Codegen Live Recorder...")
+    print("Launching Playwright Codegen Live Recorder for SMSBower...")
     print(f"User Data Directory: {bot_dir}")
     print(f"Output File: {out_file}")
-    print("Perform your steps in Chrome — actions will be saved to recorded_workflow.py!")
+    print("Perform your SMSBower clicks in Chrome — actions will be saved to recorded_workflow.py!")
     print("============================================================")
 
     try:

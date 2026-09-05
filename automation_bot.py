@@ -165,16 +165,20 @@ class SMSBowerBot:
 
                     self.current_context = context
                     
+                    # Apply stealth anti-detection JS init script to CONTEXT so ALL pages, tabs, and frames inherit it!
+                    await context.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                        window.chrome = window.chrome || { runtime: {} };
+                    """)
+
                     page = context.pages[0] if context.pages else await context.new_page()
                     if not self.headless:
                         try:
                             await page.bring_to_front()
                         except Exception:
                             pass
-
-                    await page.add_init_script("""
-                        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    """)
 
                     self.current_status = "RUNNING"
                     self.log("Navigating to SMSBower Web Cabinet...")
@@ -430,7 +434,7 @@ class SMSBowerBot:
                 line_str = line.strip()
                 if not line_str or line_str.startswith("#") or line_str.startswith("import ") or line_str.startswith("from "):
                     continue
-                if any(skip_kw in line_str for skip_kw in ["async def ", "async with async_playwright", "browser =", "context.close()", "browser.close()"]):
+                if any(skip_kw in line_str for skip_kw in ["async def ", "async with async_playwright", "browser =", "context.close()", "browser.close()", "page.close()"]):
                     continue
 
                 if any(kw in line_str for kw in ["page", "click", "fill", "press", "locator", "get_by_", "new_page", "expect_popup"]):
@@ -723,60 +727,81 @@ class SMSBowerBot:
     async def _search_familytreenow(self, page, phone_10):
         url = f"https://www.familytreenow.com/search/genealogy/results?searchtype=phone&phone={phone_10}"
         try:
+            self.log(f"Navigating to FamilyTreeNow search URL for {phone_10}...")
             await page.goto(url, wait_until="domcontentloaded", timeout=40000)
             await asyncio.sleep(2)
             
-            # Auto-click Cloudflare Turnstile if encountered
-            try:
-                turnstile_frame = page.frame(url=re.compile(r"challenges\.cloudflare\.com"))
-                if turnstile_frame:
-                    cb = await turnstile_frame.query_selector("input[type='checkbox'], .recaptcha-checkbox")
-                    if cb:
-                        await cb.click()
-                        await asyncio.sleep(2)
-            except Exception:
-                pass
+            # Auto-click & solve Cloudflare Turnstile if encountered
+            for cf_attempt in range(6):
+                content_check = await page.content()
+                if "challenges.cloudflare.com" not in content_check and "Just a moment..." not in content_check:
+                    self.log("Cloudflare Turnstile cleared successfully!")
+                    break
+
+                try:
+                    turnstile_frame = page.frame(url=re.compile(r"challenges\.cloudflare\.com"))
+                    if turnstile_frame:
+                        self.log(f"Attempt {cf_attempt+1}/6: Cloudflare challenge detected. Applying stealth click...")
+                        cb = await turnstile_frame.query_selector("input[type='checkbox'], .ctp-checkbox_label, body")
+                        if cb:
+                            box = await cb.bounding_box()
+                            if box:
+                                await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=8)
+                                await asyncio.sleep(0.4)
+                                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                            else:
+                                await cb.click()
+                except Exception as cf_err:
+                    self.log(f"Turnstile click note: {cf_err}")
+
+                await asyncio.sleep(3)
+
+            # Extra wait for results page JS load
+            await asyncio.sleep(3)
 
             content = await page.content()
             soup = BeautifulSoup(content, "html.parser")
             page_text = soup.get_text()
             
-            # Fallback if form input field is present
-            if "Not enough criteria entered" in page_text or "Search Criteria" in page_text and "0 People Records" not in page_text:
+            # If still stuck or empty form page, type number directly into search input
+            if "Just a moment..." in page_text or "Not enough criteria entered" in page_text or ("Search Criteria" in page_text and "0 People Records" not in page_text):
                 try:
                     inp = await page.query_selector("input[name='phone'], input[placeholder*='phone'], #phone")
                     if inp:
+                        self.log("Form search input found. Filling phone number directly...")
                         await inp.fill(phone_10)
+                        await asyncio.sleep(0.5)
                         btn = await page.query_selector("button:has-text('Search'), input[type='submit']")
                         if btn:
                             await btn.click()
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(4)
                             content = await page.content()
                             soup = BeautifulSoup(content, "html.parser")
                             page_text = soup.get_text()
-                except Exception:
-                    pass
+                except Exception as form_err:
+                    self.log(f"Form fallback note: {form_err}")
 
             if "0 People Records" in page_text or "No records found" in page_text:
                 return {"found": False}
 
             # Extract details
-            name_el = soup.select_one(".detail-link, .record-name, a[href*='search/person']")
+            name_el = soup.select_one(".detail-link, .record-name, a[href*='search/person'], h3, .name")
             name = name_el.get_text(strip=True) if name_el else ""
 
-            age_el = soup.select_one(".age, span:contains('Age')")
+            age_el = soup.select_one(".age, span[class*='age']")
             age = age_el.get_text(strip=True) if age_el else ""
 
-            loc_el = soup.select_one(".location, .address, span:contains('Lives in')")
+            loc_el = soup.select_one(".location, .address, span[class*='location']")
             location = loc_el.get_text(strip=True) if loc_el else ""
 
-            relatives_els = soup.select(".relatives a, .relative-name")
+            relatives_els = soup.select(".relatives a, .relative-name, a[href*='relative']")
             relatives = ", ".join([r.get_text(strip=True) for r in relatives_els[:5]]) if relatives_els else ""
 
-            if name and "No records" not in name and "Search" not in name:
+            # Check if any person record text is on page
+            if name or "Person Record" in page_text or "Living" in page_text:
                 return {
                     "found": True,
-                    "name": name,
+                    "name": name if name else "Person Record Found",
                     "age": age,
                     "location": location,
                     "relatives": relatives
