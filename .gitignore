@@ -4,5 +4,6 @@ __pycache__/
 bot_user_data/
 bot_data.db
 saved_numbers_sheet.csv
-.env
 .DS_Store
+config.bat
+node_modules
