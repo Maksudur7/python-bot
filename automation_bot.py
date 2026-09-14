@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 import time
+import json
+import urllib.request
 import logging
 import threading
 from datetime import datetime
@@ -20,6 +22,7 @@ class SMSBowerBot:
         self.logs = []
         self.max_logs = 100
         self.current_context = None
+        self.capsolver_api_key = "CAP-C839F176A1BB8AE555FFB6755BC28791F6B4095403B4C8B74CB68667B5B7F611"
         
         # Metrics
         self.numbers_checked = 0
@@ -170,7 +173,15 @@ class SMSBowerBot:
                         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                         Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                        window.chrome = window.chrome || { runtime: {} };
+                        window.chrome = window.chrome || { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
+                        const originalQuery = window.navigator.permissions ? window.navigator.permissions.query : null;
+                        if (originalQuery) {
+                            window.navigator.permissions.query = (parameters) => (
+                                parameters.name === 'notifications' ?
+                                    Promise.resolve({ state: Notification.permission }) :
+                                    originalQuery(parameters)
+                            );
+                        }
                     """)
 
                     page = context.pages[0] if context.pages else await context.new_page()
@@ -270,17 +281,37 @@ class SMSBowerBot:
 
                             if not self.is_running: break
 
-                            # Step 8: Search ONLY FastPeopleSearch
+                            # Step 8: Search FastPeopleSearch & FamilyTreeNow
                             self.log(f"Step 8: Searching FastPeopleSearch for number: {phone_10}...")
                             fps_page = await context.new_page()
                             fps_data = await self._search_fastpeoplesearch(fps_page, phone_10)
                             await fps_page.close()
 
+                            # If FastPeopleSearch does not return a record, search FamilyTreeNow as Fallback 1
+                            if not fps_data.get("found") or not fps_data.get("name"):
+                                self.log(f"⚠️ FastPeopleSearch had no match/blocked. Fallback 1: Searching FamilyTreeNow for {phone_10}...")
+                                ftn_page = await context.new_page()
+                                ftn_data = await self._search_familytreenow(ftn_page, phone_10)
+                                await ftn_page.close()
+                                if ftn_data.get("found") and ftn_data.get("name"):
+                                    fps_data = ftn_data
+                                    self.log(f"✅ Match found on FamilyTreeNow fallback! Name: '{fps_data.get('name')}'")
+
+                            # If still no record, search That's Them as Fallback 2
+                            if not fps_data.get("found") or not fps_data.get("name"):
+                                self.log(f"⚠️ FamilyTreeNow had no match/blocked. Fallback 2: Searching That's Them for {phone_10}...")
+                                tt_page = await context.new_page()
+                                tt_data = await self._search_thatsthem(tt_page, phone_10)
+                                await tt_page.close()
+                                if tt_data.get("found") and tt_data.get("name"):
+                                    fps_data = tt_data
+                                    self.log(f"✅ Match found on That's Them fallback! Name: '{fps_data.get('name')}'")
+
                             if not self.is_running: break
 
-                            # POINT 1 & 2: If NO name/record found on FastPeopleSearch -> Immediately CANCEL order on SMSBower & Get Next Number!
+                            # If NO name/record found on FastPeopleSearch, FamilyTreeNow, OR That's Them -> Cancel order on SMSBower & Get Next Number!
                             if not fps_data.get("found") or not fps_data.get("name"):
-                                self.log(f"❌ No matching name record found on FastPeopleSearch for {phone_10}.")
+                                self.log(f"❌ No matching record found across FastPeopleSearch, FamilyTreeNow, or That's Them for {phone_10}.")
                                 self.log("👉 Cancelling active order on SMSBower cabinet ($0 cost refund) and fetching new number...")
                                 cancelled = await self._cancel_order(page, order_id)
                                 if cancelled:
@@ -749,6 +780,106 @@ class SMSBowerBot:
 
         return "", ""
 
+    async def _solve_turnstile_capsolver(self, page, page_url):
+        if not self.capsolver_api_key:
+            return False
+        try:
+            sitekey = await page.evaluate("""
+                () => {
+                    const el = document.querySelector('[data-sitekey]');
+                    if (el) return el.getAttribute('data-sitekey');
+                    const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                    if (iframe) {
+                        const src = iframe.getAttribute('src') || '';
+                        const match = src.match(/k=([^&]+)/) || src.match(/sitekey=([^&]+)/);
+                        if (match) return match[1];
+                    }
+                    return null;
+                }
+            """)
+            
+            if not sitekey:
+                html = await page.content()
+                match = re.search(r"sitekey[\"']?\s*:\s*[\"']([^\"']+)[\"']", html) or re.search(r"data-sitekey=[\"']([^\"']+)[\"']", html)
+                if match:
+                    sitekey = match.group(1)
+
+            if not sitekey:
+                self.log("CapSolver note: Turnstile sitekey not found on page DOM.")
+                return False
+
+            self.log(f"🔑 Found Cloudflare Sitekey ({sitekey[:10]}...). Sending to CapSolver API...")
+
+            task_payload = {
+                "clientKey": self.capsolver_api_key,
+                "task": {
+                    "type": "AntiTurnstileTaskProxyLess",
+                    "websiteURL": page_url,
+                    "websiteKey": sitekey
+                }
+            }
+
+            req = urllib.request.Request(
+                "https://api.capsolver.com/createTask",
+                data=json.dumps(task_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            
+            loop = asyncio.get_event_loop()
+            resp_raw = await loop.run_in_executor(None, lambda: urllib.request.urlopen(req).read().decode("utf-8"))
+            data = json.loads(resp_raw)
+
+            if data.get("errorId", 0) != 0:
+                self.log(f"CapSolver API note: {data.get('errorDescription', '')} ({data.get('errorCode', '')})")
+                return False
+
+            task_id = data.get("taskId")
+            if not task_id:
+                return False
+
+            self.log(f"CapSolver Task ID: {task_id}. Polling solution token...")
+
+            for attempt in range(12):
+                await asyncio.sleep(2)
+                poll_payload = {"clientKey": self.capsolver_api_key, "taskId": task_id}
+                poll_req = urllib.request.Request(
+                    "https://api.capsolver.com/getTaskResult",
+                    data=json.dumps(poll_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                poll_raw = await loop.run_in_executor(None, lambda: urllib.request.urlopen(poll_req).read().decode("utf-8"))
+                poll_data = json.loads(poll_raw)
+
+                if poll_data.get("status") == "ready":
+                    solution = poll_data.get("solution", {})
+                    token = solution.get("token")
+                    if token:
+                        self.log("✅ CapSolver Turnstile token solved successfully!")
+                        await page.evaluate("""
+                            (token) => {
+                                const els = document.querySelectorAll('input[name="cf-turnstile-response"], [name="g-recaptcha-response"]');
+                                els.forEach(el => {
+                                    el.value = token;
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                });
+                                if (window.tsCallback) window.tsCallback(token);
+                                if (window.turnstile && window.turnstile.callback) window.turnstile.callback(token);
+                                const form = document.querySelector('form');
+                                if (form) form.submit();
+                            }
+                        """, token)
+                        await asyncio.sleep(2)
+                        return True
+                elif poll_data.get("status") == "failed":
+                    self.log(f"CapSolver polling note: {poll_data.get('errorDescription')}")
+                    return False
+
+        except Exception as e:
+            self.log(f"CapSolver solver note: {e}")
+
+        return False
+
     async def _search_fastpeoplesearch(self, page, phone_10):
         phone_clean = re.sub(r"\D", "", phone_10)[-10:]
         phone_formatted = f"{phone_clean[:3]}-{phone_clean[3:6]}-{phone_clean[6:]}" if len(phone_clean) == 10 else phone_clean
@@ -778,7 +909,13 @@ class SMSBowerBot:
                 if "challenges.cloudflare.com" in content_check or "Just a moment..." in content_check or "Verify you are human" in content_check:
                     if not warned_user:
                         self.log("⚠️ CLOUDFLARE TURNSTILE DETECTED on FastPeopleSearch!")
-                        self.log("👉 Please click the Turnstile checkbox 1 TIME manually in the Chrome window if auto-pass takes time.")
+                        self.log("🚀 Attempting automatic solving via CapSolver API...")
+                        solved = await self._solve_turnstile_capsolver(page, page.url)
+                        if solved:
+                            self.log("✅ CapSolver API successfully cleared Turnstile on FastPeopleSearch!")
+                            break
+                        else:
+                            self.log("👉 CapSolver fallback: Please click Turnstile 1 time manually if auto-pass takes time.")
                         warned_user = True
                     else:
                         self.log(f"⏳ Waiting for Turnstile clearance... [{cf_attempt+1}/{max_captcha_attempts}]")
@@ -906,7 +1043,13 @@ class SMSBowerBot:
                 if "challenges.cloudflare.com" in content_check or "Just a moment..." in content_check or "Verify you are human" in content_check:
                     if not warned_user:
                         self.log("⚠️ CLOUDFLARE TURNSTILE DETECTED on FamilyTreeNow!")
-                        self.log("👉 Please click the Turnstile checkbox 1 TIME manually in the Chrome window if auto-pass takes time.")
+                        self.log("🚀 Attempting automatic solving via CapSolver API...")
+                        solved = await self._solve_turnstile_capsolver(page, page.url)
+                        if solved:
+                            self.log("✅ CapSolver API successfully cleared Turnstile!")
+                            break
+                        else:
+                            self.log("👉 CapSolver fallback: Please click Turnstile 1 time manually if auto-pass takes time.")
                         warned_user = True
                     else:
                         self.log(f"⏳ Waiting for Turnstile clearance... [{cf_attempt+1}/{max_captcha_attempts}]")
@@ -981,10 +1124,54 @@ class SMSBowerBot:
                     "name": name if name else "Person Record Found",
                     "age": age,
                     "location": location,
-                    "relatives": relatives
+                    "relatives": relatives,
+                    "source": "FamilyTreeNow"
                 }
         except Exception as e:
             self.log(f"FamilyTreeNow lookup warning: {e}")
+
+        return {"found": False}
+
+    async def _search_thatsthem(self, page, phone_10):
+        phone_clean = re.sub(r"\D", "", phone_10)[-10:]
+        phone_formatted = f"{phone_clean[:3]}-{phone_clean[3:6]}-{phone_clean[6:]}" if len(phone_clean) == 10 else phone_clean
+        url = f"https://thatsthem.com/phone/{phone_formatted}"
+        try:
+            self.log(f"Navigating to That's Them reverse lookup URL for {phone_formatted}...")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2)
+
+            content = await page.content()
+            soup = BeautifulSoup(content, "html.parser")
+            page_text = soup.get_text()
+
+            if "No records found" in page_text or "0 Records" in page_text or "404" in page_text:
+                self.log(f"That's Them result: No matching record for {phone_10}.")
+                return {"found": False}
+
+            name_el = soup.select_one(".name a, .name, h2.name, a.name, itemprop['name']")
+            name = name_el.get_text(strip=True) if name_el else ""
+
+            age_el = soup.select_one(".age, span.age")
+            age = age_el.get_text(strip=True) if age_el else ""
+
+            loc_el = soup.select_one(".address, .location")
+            location = loc_el.get_text(strip=True) if loc_el else ""
+
+            relatives_els = soup.select(".relatives a, a[href*='name']")
+            relatives = ", ".join([r.get_text(strip=True) for r in relatives_els[:5]]) if relatives_els else ""
+
+            if name:
+                return {
+                    "found": True,
+                    "name": name,
+                    "age": age,
+                    "location": location,
+                    "relatives": relatives,
+                    "source": "That's Them"
+                }
+        except Exception as e:
+            self.log(f"That's Them lookup note: {e}")
 
         return {"found": False}
 
